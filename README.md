@@ -79,20 +79,21 @@ User Question → Streamlit UI → FastAPI Backend → LangGraph Processing → 
 4. **Interactor**: Business logic layer processes the request
 
 #### Phase 2: AI Processing (LangGraph Workflow)
-1. **Question Node**: Analyzes the user's natural language question
-2. **Schema Retrieval**: Fetches current database schema for context
-3. **SQL Generation**: Groq LLM generates SQL query based on question and schema
-4. **Query Validation**: Validates the generated SQL syntax and structure
+1. **Input Validation**: Checks for greetings or irrelevant questions
+2. **Agent Processing**: Main LLM processes the question with system context
+3. **Tool Decision**: Determines if database tools are needed
+4. **Schema Retrieval**: Fetches database schema using get_database_schema tool
+5. **SQL Generation & Execution**: Generates and executes SQL using execute_sql tool
 
-#### Phase 3: Database Execution
-1. **Query Execution**: Executes the SQL query against PostgreSQL database
-2. **Result Processing**: Processes and formats the query results
-3. **Answer Generation**: AI generates human-readable answer from results
+#### Phase 3: Answer Generation
+1. **Result Processing**: Processes raw database query results
+2. **Answer Generation**: Separate LLM generates human-readable answer
+3. **Response Formatting**: Combines SQL query and natural language answer
 
 #### Phase 4: Response Delivery
-1. **Response Formatting**: Formats the complete response with SQL and answer
-2. **API Response**: Returns structured JSON response to frontend
-3. **UI Update**: Streamlit displays results in formatted tabs
+1. **API Response**: Returns structured JSON response with SQL and answer
+2. **UI Update**: Streamlit displays results in formatted tabs
+3. **Query History**: Tracks executed queries for reference
 
 ## 📁 Project Structure
 
@@ -101,29 +102,31 @@ sql-agent/
 ├── backend/                    # FastAPI Backend
 │   ├── graph/                 # LangGraph Workflow
 │   │   ├── __init__.py
+│   │   ├── agent.py           # Main LangGraph agent workflow
 │   │   ├── answer.py          # Answer generation logic
 │   │   ├── nodes.py           # LangGraph nodes and workflow
 │   │   └── tools.py           # Database tools and utilities
 │   ├── interactors/           # Business Logic Layer
 │   │   ├── __init__.py
 │   │   ├── database.py        # Database operations
-│   │   └── query.py           # Query processing
+│   │   └── nlp.py             # NLP processing and agent integration
 │   ├── routes/                # API Route Handlers
 │   │   ├── __init__.py
 │   │   ├── database.py        # Database management routes
-│   │   ├── health.py          # Health check routes
 │   │   └── query.py           # Query processing routes
 │   ├── schemas/               # Pydantic Models
 │   │   ├── __init__.py
 │   │   ├── database.py        # Database-related schemas
 │   │   └── query.py           # Query-related schemas
-│   ├── __init__.py
-│   └── main.py               # FastAPI application entry point
+│   ├── utils/                 # Utility Functions
+│   │   ├── __init__.py
+│   │   └── db_manager.py      # Database configuration management
+│   └── __init__.py
 ├── frontend/                  # Streamlit Frontend
 │   ├── app.py                # Main Streamlit application
 │   └── run.py                # Frontend runner script
+├── main.py                   # FastAPI application entry point
 ├── .env                      # Environment variables
-├── .gitignore               # Git ignore rules
 ├── requirements.txt         # Python dependencies
 └── README.md               # Project documentation
 ```
@@ -161,7 +164,6 @@ DB_PASS=your_password
 
 4. **Start the backend server**
 ```bash
-cd backend
 python main.py
 ```
 
@@ -224,7 +226,7 @@ GET /database/schema           # Get database schema
 POST /query/ask               # Process natural language question
 ```
 
-## � LangGraph Agent Architecture
+## 🔄 LangGraph Agent Architecture
 
 ### What is LangGraph?
 
@@ -234,182 +236,182 @@ LangGraph is a library for building stateful, multi-actor applications with LLMs
 
 ```mermaid
 graph TD
-    A[User Question] --> B[Question Analysis Node]
-    B --> C[Schema Retrieval Node]
-    C --> D[SQL Generation Node]
-    D --> E[Query Validation Node]
-    E --> F{Valid Query?}
-    F -->|Yes| G[Query Execution Node]
-    F -->|No| H[Error Handling Node]
-    G --> I[Result Processing Node]
-    H --> I
-    I --> J[Answer Generation Node]
-    J --> K[Response Formatting Node]
-    K --> L[Final Response]
+    A[User Question] --> B[Input Validation Node]
+    B --> C{Valid Query?}
+    C -->|Yes| D[Agent Node with LLM]
+    C -->|No| E[Greeting/Error Response]
+    D --> F{Tool Calls Needed?}
+    F -->|Yes| G[Tools Node]
+    F -->|No| H[Final Response]
+    G --> I[Schema Tool or SQL Execution]
+    I --> D
+    E --> H
     
     style A fill:#e1f5fe
-    style L fill:#e8f5e8
-    style F fill:#fff3e0
-    style H fill:#ffebee
+    style H fill:#e8f5e8
+    style C fill:#fff3e0
+    style E fill:#ffebee
 ```
 
 ### Agent State Management
 
-The LangGraph agent maintains state throughout the entire workflow:
+The LangGraph agent maintains state throughout the entire workflow using a message-based approach:
 
 ```python
+from typing import TypedDict, Annotated
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.graph.message import add_messages
+
 class AgentState(TypedDict):
-    question: str              # Original user question
-    schema_info: str          # Database schema context
-    sql_query: str            # Generated SQL query
-    query_results: List[Dict] # Execution results
-    answer: str               # Natural language answer
-    error: Optional[str]      # Error information
-    metadata: Dict            # Additional context
+    messages: Annotated[list, add_messages]
 ```
 
 ### Node Implementations
 
-#### 1. **Question Analysis Node**
+#### 1. **Input Validation Node**
 ```python
-def question_analysis_node(state: AgentState) -> AgentState:
+def check_greeting_or_irrelevant(state):
     """
-    Analyzes the user's natural language question to understand:
-    - Query intent (SELECT, COUNT, AGGREGATE, etc.)
-    - Entities mentioned (table names, column names)
-    - Relationships and conditions
-    - Required data transformations
+    Validates user input and handles greetings or irrelevant questions:
+    - Detects greeting patterns (hello, hi, hey, etc.)
+    - Identifies irrelevant topics (weather, jokes, etc.)
+    - Returns appropriate responses for non-SQL queries
+    - Passes valid questions to the main agent
     """
-    question = state["question"]
-    # Process and analyze the question
-    # Extract key information and context
+    messages = state["messages"]
+    if not messages:
+        return state
+        
+    human_messages = [msg for msg in messages if isinstance(msg, HumanMessage)]
+    if not human_messages:
+        return state
+        
+    question = human_messages[-1].content.lower().strip()
+    
+    greetings = ['hello', 'hi', 'hey', 'good morning', 'good afternoon', 'good evening', 'how are you']
+    irrelevant_patterns = ['weather', 'joke', 'story', 'recipe', 'movie', 'music', 'sports', 'news']
+    
+    if any(greeting in question for greeting in greetings):
+        response = AIMessage(content="Hello! I'm a SQL agent specialized in database queries. Please ask me questions about your data and I'll help you write and execute SQL queries.")
+        return {"messages": [response]}
+    
+    if any(pattern in question for pattern in irrelevant_patterns) or len(question) < 3:
+        response = AIMessage(content="I'm a SQL agent and can only help with database queries and data analysis. Please ask me questions about your data.")
+        return {"messages": [response]}
+    
     return state
 ```
 
-#### 2. **Schema Retrieval Node**
+#### 2. **Main Agent Node**
 ```python
-def schema_retrieval_node(state: AgentState) -> AgentState:
+def call_model(state):
     """
-    Fetches relevant database schema information:
-    - Table structures and relationships
-    - Column names and data types
-    - Constraints and indexes
-    - Sample data for context
+    Main LLM processing node that:
+    - Processes user questions with system context
+    - Decides when to use database tools
+    - Generates SQL queries and explanations
+    - Handles tool calling workflow
     """
-    schema_tool = get_database_schema
-    schema_info = schema_tool.invoke({"query": "schema"})
-    state["schema_info"] = schema_info
-    return state
+    messages = state["messages"]
+    
+    # Add system message if not present
+    if not any(isinstance(msg, SystemMessage) for msg in messages):
+        messages = [system_message] + messages
+    
+    response = llm_with_tools.invoke(messages)
+    return {"messages": [response]}
 ```
 
-#### 3. **SQL Generation Node**
+#### 3. **Decision Node**
 ```python
-def sql_generation_node(state: AgentState) -> AgentState:
+def should_continue(state):
     """
-    Uses Groq LLM to generate SQL query:
-    - Combines question context with schema information
-    - Generates syntactically correct SQL
-    - Optimizes for performance
-    - Handles complex joins and aggregations
+    Determines workflow continuation:
+    - Checks if LLM wants to call tools
+    - Routes to tools node or ends workflow
+    - Enables iterative tool usage
     """
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+    messages = state["messages"]
+    last_message = messages[-1]
     
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", SQL_GENERATION_PROMPT),
-        ("human", "Question: {question}\nSchema: {schema_info}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({
-        "question": state["question"],
-        "schema_info": state["schema_info"]
-    })
-    
-    state["sql_query"] = extract_sql_from_response(response.content)
-    return state
-```
-
-#### 4. **Query Execution Node**
-```python
-def query_execution_node(state: AgentState) -> AgentState:
-    """
-    Executes the generated SQL query:
-    - Connects to PostgreSQL database
-    - Executes query with proper error handling
-    - Formats results for processing
-    - Handles timeouts and connection issues
-    """
-    try:
-        db_tool = execute_sql_query
-        results = db_tool.invoke({"query": state["sql_query"]})
-        state["query_results"] = results
-    except Exception as e:
-        state["error"] = str(e)
-    return state
-```
-
-#### 5. **Answer Generation Node**
-```python
-def answer_generation_node(state: AgentState) -> AgentState:
-    """
-    Converts SQL results to natural language:
-    - Analyzes query results
-    - Generates human-readable explanations
-    - Provides context and insights
-    - Formats response appropriately
-    """
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
-    
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", ANSWER_GENERATION_PROMPT),
-        ("human", "Question: {question}\nResults: {results}")
-    ])
-    
-    chain = prompt | llm
-    response = chain.invoke({
-        "question": state["question"],
-        "results": state["query_results"]
-    })
-    
-    state["answer"] = response.content
-    return state
+    if hasattr(last_message, 'tool_calls') and last_message.tool_calls:
+        return "tools"
+    return END
 ```
 
 ### Agent Tools Integration
 
-The LangGraph agent uses specialized tools for database operations:
+The LangGraph agent uses two specialized tools for database operations:
 
 #### Database Schema Tool
 ```python
-@tool
-def get_database_schema(query: str) -> str:
+@tool("get_database_schema")
+def get_database_schema(query: str = "schema") -> str:
     """
-    Retrieves comprehensive database schema information
-    including tables, columns, relationships, and constraints.
+    ALWAYS USE THIS TOOL FIRST! Discovers and returns the complete database schema 
+    including tables, columns, and relationships. This is essential to understand 
+    the database structure before writing any SQL queries.
+    
+    Features:
+    - Automatic schema discovery from PostgreSQL information_schema
+    - Foreign key relationship mapping
+    - Column type and constraint information
+    - Common query pattern examples
+    - Schema caching for performance
     """
-    # Implementation details...
+    schema = discover_database_schema()
+    
+    schema_description = "DATABASE SCHEMA:\n\n"
+    
+    for table_name, table_info in schema["tables"].items():
+        schema_description += f"Table: {table_name}\n"
+        for col in table_info["columns"]:
+            schema_description += f"  - {col['name']} ({col['type']})\n"
+        schema_description += "\n"
+    
+    if schema["relationships"]:
+        schema_description += "FOREIGN KEY RELATIONSHIPS:\n"
+        for rel in schema["relationships"]:
+            schema_description += f"  - {rel['from_table']}.{rel['from_column']} -> {rel['to_table']}.{rel['to_column']}\n"
+    
+    return schema_description
 ```
 
 #### SQL Execution Tool
 ```python
-@tool
-def execute_sql_query(query: str) -> List[Dict]:
+@tool("execute_sql", return_direct=True)
+def execute_sql(sql_query: str) -> str:
     """
-    Safely executes SQL queries against the PostgreSQL database
-    with proper error handling and result formatting.
+    Executes a SQL query on the connected database and returns results.
+    
+    Features:
+    - Direct PostgreSQL connection using psycopg2
+    - Automatic query cleaning (removes markdown formatting)
+    - Comprehensive error handling
+    - Result formatting for LLM processing
+    - Query tracking for answer generation
     """
-    # Implementation details...
-```
-
-#### Query Validation Tool
-```python
-@tool
-def validate_sql_query(query: str) -> Dict[str, Any]:
-    """
-    Validates SQL syntax and structure before execution
-    to prevent errors and security issues.
-    """
-    # Implementation details...
+    global _last_sql_query
+    
+    cleaned_query = sql_query.strip()
+    if cleaned_query.startswith('`') and cleaned_query.endswith('`'):
+        cleaned_query = cleaned_query[1:-1].strip()
+    
+    _last_sql_query = cleaned_query
+    
+    conn = get_database_connection()
+    cursor = conn.cursor()
+    
+    try:
+        cursor.execute(cleaned_query)
+        result = cursor.fetchall()
+    except Exception as e:
+        result = f"Error executing query: {str(e)}"
+    finally:
+        cursor.close()
+        conn.close()
+    
+    return str(result)
 ```
 
 ### Agent Workflow Execution
@@ -418,57 +420,132 @@ The complete workflow is orchestrated using LangGraph's StateGraph:
 
 ```python
 from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolNode
 
-# Create the workflow graph
-workflow = StateGraph(AgentState)
-
-# Add nodes
-workflow.add_node("question_analysis", question_analysis_node)
-workflow.add_node("schema_retrieval", schema_retrieval_node)
-workflow.add_node("sql_generation", sql_generation_node)
-workflow.add_node("query_execution", query_execution_node)
-workflow.add_node("answer_generation", answer_generation_node)
-
-# Define the workflow edges
-workflow.add_edge("question_analysis", "schema_retrieval")
-workflow.add_edge("schema_retrieval", "sql_generation")
-workflow.add_edge("sql_generation", "query_execution")
-workflow.add_edge("query_execution", "answer_generation")
-workflow.add_edge("answer_generation", END)
-
-# Set entry point
-workflow.set_entry_point("question_analysis")
-
-# Compile the workflow
-app = workflow.compile()
+def get_agent():
+    workflow = StateGraph(AgentState)
+    
+    # Add nodes
+    workflow.add_node("check_input", check_greeting_or_irrelevant)
+    workflow.add_node("agent", call_model)
+    workflow.add_node("tools", ToolNode(tools))
+    
+    # Set entry point
+    workflow.set_entry_point("check_input")
+    
+    # Define workflow edges
+    workflow.add_edge("check_input", "agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {
+            "tools": "tools",
+            END: END,
+        }
+    )
+    workflow.add_edge("tools", "agent")
+    
+    # Compile the workflow
+    app = workflow.compile()
+    return app
 ```
 
-### Error Handling and Recovery
+### System Prompt and AI Configuration
 
-The agent includes sophisticated error handling:
+The agent uses a comprehensive system prompt that guides the LLM behavior:
 
-- **SQL Syntax Errors**: Automatically retry with corrected syntax
-- **Database Connection Issues**: Graceful fallback and retry mechanisms
-- **Query Timeout**: Intelligent query optimization and timeout handling
-- **Invalid Results**: Result validation and error reporting
+```python
+system_message = SystemMessage(content="""You are a SQL expert assistant. When answering questions about data:
+
+WORKFLOW:
+1. ALWAYS start by using the get_database_schema tool to understand the database structure
+2. Pay careful attention to which table contains which columns and their relationships
+3. Use proper JOINs when data spans multiple tables based on foreign key relationships
+4. Use the exact table and column names shown in the schema
+5. Generate efficient SQL queries based on the discovered schema
+6. ALWAYS execute the SQL query using execute_sql tool and provide the actual results
+
+CRITICAL QUERY REQUIREMENTS:
+- When asked about "customers", always include customer names (first_name, last_name) by joining with the customers table
+- When asked about "products", always include product names by joining with the products table  
+- When asked about "orders", include relevant details like order_date, total_amount
+- Always provide meaningful, human-readable results, not just IDs
+- When using GROUP BY with JOINs, include all non-aggregate columns in the GROUP BY clause
+
+WORKFLOW RULES:
+- Call get_database_schema ONLY ONCE at the beginning to understand the structure
+- After getting the schema, immediately proceed to execute_sql with your query
+- Do NOT call get_database_schema multiple times for the same question
+- Be consistent in your approach for similar questions""")
+```
+
+### Answer Generation Process
+
+After the LangGraph agent processes the query, a separate answer generation step creates human-readable responses:
+
+```python
+def generate_answer(user_question, sql_query, db_result):
+    """
+    Converts raw database results into natural language answers:
+    - Uses Groq LLM (llama3-8b-8192) for answer generation
+    - Provides direct, concise responses
+    - Formats results appropriately for user consumption
+    """
+    prompt = ChatPromptTemplate.from_template("""
+        User asked: {user_question}
+        SQL Query: {sql_query}
+        Database result: {db_result}
+
+        Provide ONLY a direct, natural language answer. Do not include explanations, reasoning, or extra text.
+
+        Examples:
+        - If result = [(20,)] → "There are 20 students."
+        - If result = [('John',), ('Jane',)] → "The students are John and Jane."
+        - If result = [(100, 'CS'), (50, 'Math')] → "There are 100 students in CS and 50 students in Math."
+        
+        Answer:
+    """)
+
+    llm = ChatGroq(
+        groq_api_key=os.getenv("GROQ_API_KEY"),
+        model_name="llama3-8b-8192"
+    )
+
+    chain = prompt | llm | StrOutputParser()
+    return chain.invoke({
+        "user_question": user_question,
+        "sql_query": sql_query,
+        "db_result": db_result
+    })
+```
 
 ### Agent Benefits
 
-1. **Stateful Processing**: Maintains context throughout the entire workflow
-2. **Error Recovery**: Can backtrack and retry with corrections
-3. **Modular Design**: Each node can be independently tested and modified
-4. **Scalable Architecture**: Easy to add new nodes and capabilities
-5. **Debugging Support**: Full visibility into each step of the process
+1. **Message-Based State**: Uses LangChain's message system for natural conversation flow
+2. **Tool Integration**: Seamless integration with database tools using LangGraph's ToolNode
+3. **Input Validation**: Handles greetings and irrelevant queries appropriately
+4. **Iterative Processing**: Can call multiple tools in sequence as needed
+5. **Error Handling**: Comprehensive error handling at both tool and workflow levels
+6. **Performance Optimization**: Schema caching and efficient query execution
 
 ## 🧠 AI Workflow Details
 
 ### LangGraph Workflow Components
 
 ### AI Model Configuration
-- **Model**: Llama-3.1-8b-instant (via Groq)
+
+#### Main Agent Model
+- **Model**: llama-3.1-8b-instant (via Groq)
 - **Temperature**: 0.0 (deterministic responses)
 - **Max Tokens**: 1000
 - **Provider**: Groq AI Platform
+- **Usage**: SQL generation and query processing
+
+#### Answer Generation Model
+- **Model**: llama3-8b-8192 (via Groq)
+- **Temperature**: Default
+- **Provider**: Groq AI Platform
+- **Usage**: Converting SQL results to natural language answers
 
 ## 🎨 Frontend Features
 
